@@ -12,6 +12,49 @@ import (
 	"github.com/gentleman-programming/gentle-ai/internal/model"
 )
 
+func TestResolveProfileStrategy_ExplicitWins(t *testing.T) {
+	home := t.TempDir()
+
+	profilesDir := filepath.Join(home, ".config", "opencode", "profiles")
+	if err := os.MkdirAll(profilesDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profiles): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(profilesDir, "active.json"), []byte(`{"name":"external"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(active.json): %v", err)
+	}
+
+	got := ResolveProfileStrategy(home, model.SDDProfileStrategyGeneratedMulti)
+	if got != model.SDDProfileStrategyGeneratedMulti {
+		t.Fatalf("ResolveProfileStrategy(explicit) = %q, want %q", got, model.SDDProfileStrategyGeneratedMulti)
+	}
+}
+
+func TestResolveProfileStrategy_AutoDetectsExternalProfiles(t *testing.T) {
+	home := t.TempDir()
+
+	profilesDir := filepath.Join(home, ".config", "opencode", "profiles")
+	if err := os.MkdirAll(profilesDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(profiles): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(profilesDir, "cheap.json"), []byte(`{"name":"cheap"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(cheap.json): %v", err)
+	}
+
+	got := ResolveProfileStrategy(home, "")
+	if got != model.SDDProfileStrategyExternalSingleActive {
+		t.Fatalf("ResolveProfileStrategy(auto) = %q, want %q", got, model.SDDProfileStrategyExternalSingleActive)
+	}
+}
+
+func TestResolveProfileStrategy_DefaultsGeneratedMultiWithoutExternalProfiles(t *testing.T) {
+	home := t.TempDir()
+
+	got := ResolveProfileStrategy(home, "")
+	if got != model.SDDProfileStrategyGeneratedMulti {
+		t.Fatalf("ResolveProfileStrategy(no external profiles) = %q, want %q", got, model.SDDProfileStrategyGeneratedMulti)
+	}
+}
+
 // ─── ValidateProfileName ───────────────────────────────────────────────────
 
 func TestValidateProfileName_Valid(t *testing.T) {
@@ -539,6 +582,26 @@ func TestGenerateProfileOverlay_OrchestratorPromptSuffixed(t *testing.T) {
 	// The orchestrator prompt should reference suffixed sub-agents
 	if !strings.Contains(prompt, "sdd-init-cheap") && !strings.Contains(prompt, "-cheap") {
 		t.Errorf("orchestrator prompt doesn't contain suffixed sub-agent references; snippet: %q", prompt[:min(200, len(prompt))])
+	}
+
+	for _, unwanted := range []string{
+		"Agent Teams Lite",
+		"| orchestrator | opus |",
+		"| sdd-explore | sonnet |",
+		"| sdd-archive | haiku |",
+	} {
+		if strings.Contains(prompt, unwanted) {
+			t.Fatalf("profile orchestrator prompt contains legacy content %q", unwanted)
+		}
+	}
+
+	for _, wanted := range []string{
+		"Gentle AI",
+		"| orchestrator | anthropic/claude-haiku-3-5 |",
+	} {
+		if !strings.Contains(prompt, wanted) {
+			t.Fatalf("profile orchestrator prompt missing %q", wanted)
+		}
 	}
 }
 
