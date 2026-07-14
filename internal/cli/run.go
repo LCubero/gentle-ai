@@ -1561,8 +1561,13 @@ func componentPathsWithWorkspaceScoped(homeDir, workspaceDir string, scope Insta
 			paths = append(paths, gga.ConfigPath(homeDir))
 			paths = append(paths, gga.AgentsTemplatePath(homeDir))
 		case model.ComponentTheme:
-			if p := adapter.SettingsPath(homeDir); p != "" {
-				paths = append(paths, p)
+			// Theme injection is a no-op for adapters that opt out (their settings
+			// schema rejects a top-level "theme" key), so they create no file to
+			// verify. Only require the settings file where a theme is written.
+			if agents.SupportsThemeInjection(adapter) {
+				if p := adapter.SettingsPath(homeDir); p != "" {
+					paths = append(paths, p)
+				}
 			}
 		case model.ComponentClaudeTheme:
 			if adapter.Agent() == model.AgentClaudeCode {

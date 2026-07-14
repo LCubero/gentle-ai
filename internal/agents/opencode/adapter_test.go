@@ -219,6 +219,12 @@ func TestEffectiveCodeGraphWiring(t *testing.T) {
 	}
 }
 
+func TestSupportsThemeInjection(t *testing.T) {
+	if NewAdapter().SupportsThemeInjection() {
+		t.Fatalf("SupportsThemeInjection() = true, want false; opencode.json schema rejects a top-level theme key")
+	}
+}
+
 func TestConfigPathIgnoresRelativeXDGConfigHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

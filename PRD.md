@@ -210,7 +210,7 @@ The installer supports configuring the Gentleman ecosystem into ANY AI coding ag
 | Agent | Config Location | Ecosystem Support | Priority |
 |-------|-----------------|-------------------|----------|
 | Claude Code (Anthropic) | `~/.claude/` | Full: plugins, skills, MCP, CLAUDE.md, settings, hooks, theme, statusline | P0 |
-| OpenCode | `~/.config/opencode/` | Full: plugins, skills, MCP, agents, commands, theme | P0 |
+| OpenCode | `~/.config/opencode/` | Full: plugins, skills, MCP, agents, commands (no theme: opencode.json's strict schema rejects a top-level theme key, #497) | P0 |
 | Gemini CLI (Google) | `~/.gemini/` | Partial: MCP, system instructions, skills via system.md | P1 |
 | Codex (OpenAI) | `~/.codex/` | Partial: MCP, instructions, config.toml | P1 |
 | Aider | `~/.aider/` or `.aider.conf.yml` | Partial: conventions via config, limited MCP | P2 |
@@ -231,7 +231,7 @@ The installer supports configuring the Gentleman ecosystem into ANY AI coding ag
 
 | Tier | What Gets Configured | Agents |
 |------|---------------------|--------|
-| **Full** | Engram plugin + MCP servers + skills + SDD orchestrator + GGA integration + persona + theme + permissions + statusline + hooks | Claude Code, OpenCode |
+| **Full** | Engram plugin + MCP servers + skills + SDD orchestrator + GGA integration + persona + theme (Claude only; OpenCode's strict schema rejects a top-level theme key, #497) + permissions + statusline + hooks | Claude Code, OpenCode |
 | **Good** | Skills + MCP servers + SDD (inline mode, no sub-agents) + GGA as review provider + persona rules | Cursor, VSCode |
 | **Partial** | Skills via system instructions + MCP where supported + GGA provider config + persona | Gemini CLI, Codex, Windsurf, JetBrains, Zed |
 | **Minimal** | Persona and coding conventions via project/workspace rules | Xcode, Antigravity, any emerging agent |
@@ -827,7 +827,7 @@ graph TD
     end
 
     subgraph OC_CONFIG["OpenCode (~/.config/opencode/)"]
-        OC_JSON[opencode.json<br/>Agents, MCP servers,<br/>Engram plugin, theme]
+        OC_JSON[opencode.json<br/>Agents, MCP servers,<br/>Engram plugin<br/>no theme: strict schema rejects it]
         OC_SKILLS_DIR[skill/<br/>SDD skills + coding skills]
         OC_COMMANDS[commands/<br/>SDD slash commands]
         OC_PLUGINS[plugins/<br/>engram.ts]
@@ -1244,7 +1244,7 @@ When the installer completes with "Dev Stack + Polish" (`full-gentleman`) preset
 - `~/.claude.json` — Context7 MCP server configured
 
 **OpenCode:**
-- `~/.config/opencode/opencode.json` — Agents (gentleman, sdd-orchestrator), MCP servers (engram, context7), Engram plugin, Gentleman theme
+- `~/.config/opencode/opencode.json` — Agents (gentleman, sdd-orchestrator), MCP servers (engram, context7), Engram plugin (OpenCode's strict schema rejects a top-level theme key, so no theme is written here)
 - `~/.config/opencode/skills/` — All selected skills mirrored
 - `~/.config/opencode/commands/` — SDD slash commands
 - `~/.config/opencode/plugins/` — Engram TypeScript plugin

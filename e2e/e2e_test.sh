@@ -1024,15 +1024,16 @@ test_oc_permissions_injection() {
 }
 
 test_oc_theme_injection() {
-    log_test "OpenCode: theme injection"
+    log_test "OpenCode: theme injection skipped (opencode.json rejects top-level theme)"
     cleanup_test_env
 
     if $BINARY install --agent opencode --component theme --persona neutral 2>&1; then
         local settings="$HOME/.config/opencode/opencode.json"
-        assert_file_exists "$settings" "OpenCode opencode.json"
-        assert_file_contains "$settings" '"theme"' "Has theme key"
-        assert_file_contains "$settings" 'gentleman-kanagawa' "Has gentleman-kanagawa theme"
-        assert_valid_json "$settings" "opencode.json is valid JSON"
+        # OpenCode's opencode.json schema is strict and rejects an unrecognized
+        # top-level "theme" key (ConfigInvalidError), so Gentle AI must not write
+        # it there. Theme injection is a no-op for OpenCode — see issue #497.
+        assert_file_not_contains "$settings" '"theme"' "opencode.json has no top-level theme key"
+        assert_file_not_contains "$settings" 'gentleman-kanagawa' "opencode.json has no gentleman-kanagawa theme"
     else
         log_fail "OpenCode theme install command failed"
     fi
@@ -1093,7 +1094,9 @@ test_full_preset_opencode() {
         # opencode.json should have all overlays merged
         assert_file_exists "$settings" "OpenCode opencode.json"
         assert_file_contains "$settings" '"permission"' "Has permission config"
-        assert_file_contains "$settings" '"theme"' "Has theme"
+        # Theme injection is a no-op for OpenCode: opencode.json's strict schema
+        # rejects a top-level "theme" key (#497), so it must never be merged here.
+        assert_file_not_contains "$settings" '"theme"' "opencode.json has no top-level theme key"
         assert_file_contains "$settings" '"mcp"' "Has MCP servers"
         assert_file_contains "$settings" '"context7"' "Has context7 MCP"
         assert_valid_json "$settings" "opencode.json is valid JSON"
@@ -1471,21 +1474,24 @@ test_idempotent_skills_claude() {
 }
 
 test_idempotent_theme_opencode() {
-    log_test "Idempotency: theme on OpenCode (run twice, same result)"
+    log_test "Idempotency: theme on OpenCode is a stable no-op"
     cleanup_test_env
 
-    $BINARY install --agent opencode --component theme --persona neutral 2>&1 || true
-    local first_hash
-    first_hash=$(md5sum "$HOME/.config/opencode/opencode.json" 2>/dev/null | cut -d' ' -f1)
-
-    $BINARY install --agent opencode --component theme --persona neutral 2>&1 || true
-    local second_hash
-    second_hash=$(md5sum "$HOME/.config/opencode/opencode.json" 2>/dev/null | cut -d' ' -f1)
-
-    if [ "$first_hash" = "$second_hash" ] && [ -n "$first_hash" ]; then
-        log_pass "Idempotent: same theme config after two runs"
+    local settings="$HOME/.config/opencode/opencode.json"
+    # Theme injection is a no-op for OpenCode (opencode.json's strict schema
+    # rejects a top-level "theme" key — #497). Both runs must SUCCEED (exit 0 —
+    # the regression guard: a no-op must not fail post-apply verification) and
+    # leave the file without a theme key.
+    if $BINARY install --agent opencode --component theme --persona neutral 2>&1; then
+        assert_file_not_contains "$settings" '"theme"' "No theme key after first run"
     else
-        log_fail "Theme config changed between runs ($first_hash vs $second_hash)"
+        log_fail "First OpenCode theme install exited non-zero (should be a clean no-op)"
+    fi
+
+    if $BINARY install --agent opencode --component theme --persona neutral 2>&1; then
+        assert_file_not_contains "$settings" '"theme"' "No theme key after second run"
+    else
+        log_fail "Second OpenCode theme install exited non-zero (should be a clean no-op)"
     fi
 }
 
@@ -1629,7 +1635,9 @@ test_edge_multiple_json_overlays() {
 
     local settings="$HOME/.config/opencode/opencode.json"
     assert_file_contains "$settings" '"permission"' "Permission config present after 3 merges"
-    assert_file_contains "$settings" '"theme"' "Theme present after 3 merges"
+    # Theme is a no-op for OpenCode (#497): the theme install must not add a
+    # top-level "theme" key while the permission/context7 overlays still merge.
+    assert_file_not_contains "$settings" '"theme"' "Theme not merged into OpenCode (no-op)"
     assert_file_contains "$settings" '"mcp"' "MCP servers present after 3 merges"
     assert_file_contains "$settings" '"context7"' "Context7 present after 3 merges"
     assert_valid_json "$settings" "Final merged JSON is valid"

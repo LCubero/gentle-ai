@@ -64,3 +64,22 @@ type Adapter interface {
 type EffectiveCodeGraphWiringDetector interface {
 	EffectiveCodeGraphWiring(homeDir string) (path string, configured bool)
 }
+
+// ThemeInjectionController is an optional adapter capability. Agents whose
+// settings schema rejects a top-level "theme" key implement it and return
+// false to opt out of theme injection into their settings file. Adapters that
+// do not implement it are treated as supporting theme injection.
+type ThemeInjectionController interface {
+	SupportsThemeInjection() bool
+}
+
+// SupportsThemeInjection reports whether theme injection into the adapter's
+// settings file is permitted. An adapter opts out by implementing
+// ThemeInjectionController and returning false; adapters that do not implement
+// it support theme injection by default. This is the single source of truth for
+// the opt-out so that every consumer (injection and post-apply verification)
+// agrees on which adapters receive a theme.
+func SupportsThemeInjection(adapter Adapter) bool {
+	controller, ok := adapter.(ThemeInjectionController)
+	return !ok || controller.SupportsThemeInjection()
+}

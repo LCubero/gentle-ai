@@ -69,12 +69,12 @@ func TestInjectMergesThemeOverlayIntoAdapterSettings(t *testing.T) {
 func TestInjectCreatesAdapterSettingsWhenMissing(t *testing.T) {
 	home := t.TempDir()
 
-	result, err := Inject(home, opencodeAdapter())
+	result, err := Inject(home, claudeAdapter())
 	if err != nil {
 		t.Fatalf("Inject() error = %v", err)
 	}
 
-	settingsPath := filepath.Join(home, ".config", "opencode", "opencode.json")
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
 	if !result.Changed {
 		t.Fatalf("Inject() changed = false")
 	}
@@ -92,8 +92,28 @@ func TestInjectCreatesAdapterSettingsWhenMissing(t *testing.T) {
 	if err := json.Unmarshal(data, &root); err != nil {
 		t.Fatalf("Unmarshal(settings) error = %v", err)
 	}
-	if root.Theme != "gentleman-kanagawa" {
-		t.Fatalf("theme = %q, want gentleman-kanagawa", root.Theme)
+	// Value-agnostic on purpose: this test verifies a theme key is written to a
+	// freshly created settings file, not which identifier. The identifier itself
+	// is owned by issue #896 / PR #1061, which is changing it separately.
+	if root.Theme == "" {
+		t.Fatalf("theme = %q, want a non-empty theme identifier in the created settings", root.Theme)
+	}
+}
+
+func TestInjectSkipsOpenCodeThemeInjection(t *testing.T) {
+	home := t.TempDir()
+
+	result, err := Inject(home, opencodeAdapter())
+	if err != nil {
+		t.Fatalf("Inject() error = %v", err)
+	}
+	if result.Changed || len(result.Files) != 0 {
+		t.Fatalf("Inject() = %#v, want no-op for OpenCode; opencode.json schema rejects top-level theme", result)
+	}
+
+	settingsPath := filepath.Join(home, ".config", "opencode", "opencode.json")
+	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+		t.Fatalf("Inject() must not write opencode.json for OpenCode; stat error = %v", err)
 	}
 }
 
