@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -165,6 +166,33 @@ func isEffectiveCodeGraphEntry(value any) bool {
 // skipped for OpenCode.
 func (a *Adapter) SupportsThemeInjection() bool {
 	return false
+}
+
+func (a *Adapter) MigrateThemeSettings(homeDir string) (string, bool, error) {
+	settingsPath := a.SettingsPath(homeDir)
+	info, err := os.Stat(settingsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("stat OpenCode settings %q: %w", settingsPath, err)
+	}
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return "", false, fmt.Errorf("read OpenCode settings %q: %w", settingsPath, err)
+	}
+	updated, changed, err := filemerge.RemoveTopLevelJSONKey(raw, "theme")
+	if err != nil {
+		return "", false, fmt.Errorf("migrate OpenCode settings %q: %w", settingsPath, err)
+	}
+	if !changed {
+		return settingsPath, false, nil
+	}
+	result, err := filemerge.WriteFileAtomic(settingsPath, updated, info.Mode().Perm())
+	if err != nil {
+		return "", false, fmt.Errorf("write migrated OpenCode settings %q: %w", settingsPath, err)
+	}
+	return settingsPath, result.Changed, nil
 }
 
 func (a *Adapter) SupportsOutputStyles() bool {

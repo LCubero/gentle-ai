@@ -117,6 +117,79 @@ func TestInjectSkipsOpenCodeThemeInjection(t *testing.T) {
 	}
 }
 
+func TestInjectRemovesLegacyOpenCodeThemeOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", "")
+	settingsPath := filepath.Join(home, ".config", "opencode", "opencode.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(settings dir) error = %v", err)
+	}
+	input := "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"theme\": \"gentleman-kanagawa\",\n  \"agent\": {\"reviewer\": {\"theme\": \"nested-theme\", \"model\": \"test/model\"}},\n  \"share\": \"disabled\"\n}\n"
+	want := "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"agent\": {\"reviewer\": {\"theme\": \"nested-theme\", \"model\": \"test/model\"}},\n  \"share\": \"disabled\"\n}\n"
+	if err := os.WriteFile(settingsPath, []byte(input), 0o600); err != nil {
+		t.Fatalf("WriteFile(settings) error = %v", err)
+	}
+
+	result, err := Inject(home, opencodeAdapter())
+	if err != nil {
+		t.Fatalf("Inject() error = %v", err)
+	}
+	if !result.Changed || len(result.Files) != 1 || result.Files[0] != settingsPath {
+		t.Fatalf("Inject() = %#v, want changed OpenCode settings", result)
+	}
+
+	got, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(settings) error = %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("settings after migration =\n%s\nwant only root theme removed:\n%s", got, want)
+	}
+	info, err := os.Stat(settingsPath)
+	if err != nil {
+		t.Fatalf("Stat(settings) error = %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("settings mode = %o, want preserved 600", got)
+	}
+
+	second, err := Inject(home, opencodeAdapter())
+	if err != nil {
+		t.Fatalf("Inject() second error = %v", err)
+	}
+	if second.Changed || len(second.Files) != 0 {
+		t.Fatalf("Inject() second = %#v, want idempotent no-op", second)
+	}
+}
+
+func TestInjectRejectsMalformedLegacyOpenCodeSettingsWithoutMutation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", "")
+	settingsPath := filepath.Join(home, ".config", "opencode", "opencode.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(settings dir) error = %v", err)
+	}
+	input := []byte("{\n  \"theme\": \"gentleman-kanagawa\",\n  \"share\":\n")
+	if err := os.WriteFile(settingsPath, input, 0o600); err != nil {
+		t.Fatalf("WriteFile(settings) error = %v", err)
+	}
+
+	result, err := Inject(home, opencodeAdapter())
+	if err == nil {
+		t.Fatalf("Inject() error = nil, want malformed JSON error")
+	}
+	if result.Changed || len(result.Files) != 0 {
+		t.Fatalf("Inject() = %#v after error, want no reported mutation", result)
+	}
+	got, readErr := os.ReadFile(settingsPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(settings) error = %v", readErr)
+	}
+	if string(got) != string(input) {
+		t.Fatalf("malformed settings changed = %q, want %q", got, input)
+	}
+}
+
 func TestInjectClaudeThemeIsIdempotent(t *testing.T) {
 	home := t.TempDir()
 

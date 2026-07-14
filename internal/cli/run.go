@@ -1561,11 +1561,10 @@ func componentPathsWithWorkspaceScoped(homeDir, workspaceDir string, scope Insta
 			paths = append(paths, gga.ConfigPath(homeDir))
 			paths = append(paths, gga.AgentsTemplatePath(homeDir))
 		case model.ComponentTheme:
-			// Theme injection is a no-op for adapters that opt out (their settings
-			// schema rejects a top-level "theme" key), so they create no file to
-			// verify. Only require the settings file where a theme is written.
-			if agents.SupportsThemeInjection(adapter) {
-				if p := adapter.SettingsPath(homeDir); p != "" {
+			// Opted-out adapters may still migrate an existing settings file. Include
+			// it in backup and verification, but never require or create a missing file.
+			if p := adapter.SettingsPath(homeDir); p != "" {
+				if _, err := os.Stat(p); agents.SupportsThemeInjection(adapter) || err == nil {
 					paths = append(paths, p)
 				}
 			}

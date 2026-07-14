@@ -73,6 +73,12 @@ type ThemeInjectionController interface {
 	SupportsThemeInjection() bool
 }
 
+// ThemeSettingsMigrator is an optional adapter capability for repairing legacy
+// theme settings before current injection behavior is applied.
+type ThemeSettingsMigrator interface {
+	MigrateThemeSettings(homeDir string) (path string, changed bool, err error)
+}
+
 // SupportsThemeInjection reports whether theme injection into the adapter's
 // settings file is permitted. An adapter opts out by implementing
 // ThemeInjectionController and returning false; adapters that do not implement

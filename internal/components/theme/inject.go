@@ -40,6 +40,15 @@ var gentlemanClaudeTheme = claudeTheme{
 }
 
 func Inject(homeDir string, adapter agents.Adapter) (InjectionResult, error) {
+	if migrator, ok := adapter.(agents.ThemeSettingsMigrator); ok {
+		path, changed, err := migrator.MigrateThemeSettings(homeDir)
+		if err != nil {
+			return InjectionResult{}, err
+		}
+		if changed {
+			return InjectionResult{Changed: true, Files: []string{path}}, nil
+		}
+	}
 	if !agents.SupportsThemeInjection(adapter) {
 		return InjectionResult{}, nil
 	}

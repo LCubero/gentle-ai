@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -41,6 +42,29 @@ func TestComponentPathsSDDIncludesOpenCodeSettingsAndCommands(t *testing.T) {
 	command := filepath.Join(home, ".config", "opencode", "commands", "sdd-init.md")
 	if !containsPath(paths, command) {
 		t.Fatalf("componentPaths(sdd) missing OpenCode command path %q\npaths=%v", command, paths)
+	}
+}
+
+func TestComponentPathsThemeOpenCodeTracksOnlyExistingSettings(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", "")
+	adapters := resolveAdapters([]model.AgentID{model.AgentOpenCode})
+	settingsPath := filepath.Join(home, ".config", "opencode", "opencode.json")
+
+	paths := componentPaths(home, model.Selection{}, adapters, model.ComponentTheme)
+	if containsPath(paths, settingsPath) {
+		t.Fatalf("componentPaths(theme) includes missing OpenCode settings %q", settingsPath)
+	}
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(settings dir) error = %v", err)
+	}
+	if err := os.WriteFile(settingsPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(settings) error = %v", err)
+	}
+
+	paths = componentPaths(home, model.Selection{}, adapters, model.ComponentTheme)
+	if !containsPath(paths, settingsPath) {
+		t.Fatalf("componentPaths(theme) missing existing OpenCode settings %q", settingsPath)
 	}
 }
 
