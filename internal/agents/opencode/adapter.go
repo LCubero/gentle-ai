@@ -159,11 +159,8 @@ func isEffectiveCodeGraphEntry(value any) bool {
 
 // --- Optional capabilities ---
 
-// SupportsThemeInjection reports whether Gentle AI may write a top-level "theme"
-// key into opencode.json. OpenCode's opencode.json schema is strict and rejects
-// an unrecognized top-level "theme" key (ConfigInvalidError), which breaks
-// runtime config updates such as profile activation, so theme injection is
-// skipped for OpenCode.
+// SupportsThemeInjection returns false because OpenCode's strict opencode.json
+// schema rejects a top-level "theme" key (ConfigInvalidError), breaking runtime config updates such as profile activation.
 func (a *Adapter) SupportsThemeInjection() bool {
 	return false
 }

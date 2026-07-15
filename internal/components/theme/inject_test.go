@@ -92,9 +92,6 @@ func TestInjectCreatesAdapterSettingsWhenMissing(t *testing.T) {
 	if err := json.Unmarshal(data, &root); err != nil {
 		t.Fatalf("Unmarshal(settings) error = %v", err)
 	}
-	// Value-agnostic on purpose: this test verifies a theme key is written to a
-	// freshly created settings file, not which identifier. The identifier itself
-	// is owned by issue #896 / PR #1061, which is changing it separately.
 	if root.Theme == "" {
 		t.Fatalf("theme = %q, want a non-empty theme identifier in the created settings", root.Theme)
 	}
@@ -111,8 +108,7 @@ func TestInjectSkipsOpenCodeThemeInjection(t *testing.T) {
 		t.Fatalf("Inject() = %#v, want no-op for OpenCode; opencode.json schema rejects top-level theme", result)
 	}
 
-	settingsPath := filepath.Join(home, ".config", "opencode", "opencode.json")
-	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(home, ".config", "opencode", "opencode.json")); !os.IsNotExist(err) {
 		t.Fatalf("Inject() must not write opencode.json for OpenCode; stat error = %v", err)
 	}
 }
@@ -124,8 +120,8 @@ func TestInjectRemovesLegacyOpenCodeThemeOnly(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll(settings dir) error = %v", err)
 	}
-	input := "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"theme\": \"gentleman-kanagawa\",\n  \"agent\": {\"reviewer\": {\"theme\": \"nested-theme\", \"model\": \"test/model\"}},\n  \"share\": \"disabled\"\n}\n"
-	want := "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"agent\": {\"reviewer\": {\"theme\": \"nested-theme\", \"model\": \"test/model\"}},\n  \"share\": \"disabled\"\n}\n"
+	input := "{\n  // Keep this comment with the schema setting.\n  \"theme\": \"gentleman-kanagawa\",\n      \"$schema\": \"https://opencode.ai/config.json\",\n  \"agent\": {\"reviewer\": {\"theme\": \"nested-theme\", \"model\": \"test/model\"}},\n  \"share\": \"disabled\"\n}\n"
+	want := "{\n  // Keep this comment with the schema setting.\n      \"$schema\": \"https://opencode.ai/config.json\",\n  \"agent\": {\"reviewer\": {\"theme\": \"nested-theme\", \"model\": \"test/model\"}},\n  \"share\": \"disabled\"\n}\n"
 	if err := os.WriteFile(settingsPath, []byte(input), 0o600); err != nil {
 		t.Fatalf("WriteFile(settings) error = %v", err)
 	}
@@ -160,33 +156,64 @@ func TestInjectRemovesLegacyOpenCodeThemeOnly(t *testing.T) {
 	if second.Changed || len(second.Files) != 0 {
 		t.Fatalf("Inject() second = %#v, want idempotent no-op", second)
 	}
+
+	for _, tt := range []struct{ name, input, want string }{
+		{"sole member after line comment", "{// keep\n\"theme\":\"x\"}", "{// keep\n}"},
+		{"same-line next member after line comment", "{// keep\n\"theme\": \"x\",\"share\": \"disabled\"}", "{// keep\n\"share\": \"disabled\"}"},
+		{"same-line next member after CRLF comment", "{// keep\r\n\"theme\": \"x\",\"share\": \"disabled\"}", "{// keep\r\n\"share\": \"disabled\"}"},
+		{"same-line next member after block comment", "{/*keep*/\"theme\": \"x\",\"share\": \"disabled\"}", "{/*keep*/\"share\": \"disabled\"}"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := os.WriteFile(settingsPath, []byte(tt.input), 0o600); err != nil {
+				t.Fatalf("WriteFile(settings) error = %v", err)
+			}
+			if _, err := Inject(home, opencodeAdapter()); err != nil {
+				t.Fatalf("Inject() error = %v", err)
+			}
+			got, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatalf("ReadFile(settings) error = %v", err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("settings after migration = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestInjectRejectsMalformedLegacyOpenCodeSettingsWithoutMutation(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", "")
-	settingsPath := filepath.Join(home, ".config", "opencode", "opencode.json")
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll(settings dir) error = %v", err)
-	}
-	input := []byte("{\n  \"theme\": \"gentleman-kanagawa\",\n  \"share\":\n")
-	if err := os.WriteFile(settingsPath, input, 0o600); err != nil {
-		t.Fatalf("WriteFile(settings) error = %v", err)
-	}
-
-	result, err := Inject(home, opencodeAdapter())
-	if err == nil {
-		t.Fatalf("Inject() error = nil, want malformed JSON error")
-	}
-	if result.Changed || len(result.Files) != 0 {
-		t.Fatalf("Inject() = %#v after error, want no reported mutation", result)
-	}
-	got, readErr := os.ReadFile(settingsPath)
-	if readErr != nil {
-		t.Fatalf("ReadFile(settings) error = %v", readErr)
-	}
-	if string(got) != string(input) {
-		t.Fatalf("malformed settings changed = %q, want %q", got, input)
+	for _, tt := range []struct{ name, input string }{
+		{"incomplete value", "{\n  \"theme\": \"gentleman-kanagawa\",\n  \"share\":\n"},
+		{"unterminated trailing block comment", "{\n  \"theme\": \"gentleman-kanagawa\"\n}\n/*"},
+		{"comment-spliced boolean", "{\"theme\":\"x\",\"ok\":tr/*c*/ue}"},
+		{"comment-spliced number", "{\"theme\":\"x\",\"n\":1/*c*/2}"},
+		{"comment-spliced null", "{\"theme\":\"x\",\"v\":n/*c*/ull}"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("XDG_CONFIG_HOME", "")
+			settingsPath := filepath.Join(home, ".config", "opencode", "opencode.json")
+			if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+				t.Fatalf("MkdirAll(settings dir) error = %v", err)
+			}
+			if err := os.WriteFile(settingsPath, []byte(tt.input), 0o600); err != nil {
+				t.Fatalf("WriteFile(settings) error = %v", err)
+			}
+			result, err := Inject(home, opencodeAdapter())
+			if err == nil {
+				t.Fatalf("Inject() error = nil, want malformed JSON error")
+			}
+			if result.Changed || len(result.Files) != 0 {
+				t.Fatalf("Inject() = %#v after error, want no reported mutation", result)
+			}
+			got, readErr := os.ReadFile(settingsPath)
+			if readErr != nil {
+				t.Fatalf("ReadFile(settings) error = %v", readErr)
+			}
+			if string(got) != tt.input {
+				t.Fatalf("malformed settings changed = %q, want %q", got, tt.input)
+			}
+		})
 	}
 }
 

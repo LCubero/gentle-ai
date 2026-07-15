@@ -1561,8 +1561,7 @@ func componentPathsWithWorkspaceScoped(homeDir, workspaceDir string, scope Insta
 			paths = append(paths, gga.ConfigPath(homeDir))
 			paths = append(paths, gga.AgentsTemplatePath(homeDir))
 		case model.ComponentTheme:
-			// Opted-out adapters may still migrate an existing settings file. Include
-			// it in backup and verification, but never require or create a missing file.
+			// Include existing settings in backup and verification for migration, but never require or create a missing file.
 			if p := adapter.SettingsPath(homeDir); p != "" {
 				if _, err := os.Stat(p); agents.SupportsThemeInjection(adapter) || err == nil {
 					paths = append(paths, p)
