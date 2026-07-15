@@ -74,12 +74,12 @@ func removeTopLevelJSONKeyOnce(raw, quotedKey []byte) ([]byte, bool) {
 					if trivia[offset] != '/' {
 						continue
 					}
-					commentEnd = skipJSONComment(trivia, offset)
-					offset = commentEnd - 1
-					if commentEnd < len(trivia) && trivia[commentEnd] == '\n' {
-						commentEnd++
-						offset++
+					next := skipJSONComment(trivia, offset)
+					if next <= offset {
+						return raw, false
 					}
+					commentEnd = skipJSONLineEnding(trivia, next)
+					offset = commentEnd - 1
 				}
 				removeStart = memberStart + commentEnd
 			}
@@ -89,11 +89,7 @@ func removeTopLevelJSONKeyOnce(raw, quotedKey []byte) ([]byte, bool) {
 				removeStart = previousComma
 			}
 			if preserveComment {
-				if bytes.HasPrefix(raw[removeEnd:], []byte("\r\n")) {
-					removeEnd += 2
-				} else if bytes.HasPrefix(raw[removeEnd:], []byte("\n")) {
-					removeEnd++
-				}
+				removeEnd = skipJSONLineEnding(raw, removeEnd)
 			}
 			updated := bytes.Clone(raw[:removeStart])
 			updated = append(updated, raw[removeEnd:]...)
@@ -126,7 +122,11 @@ func scanJSONValueDelimiter(raw []byte, start int) int {
 		case '"':
 			i = scanJSONString(raw, i) - 1
 		case '/':
-			i = skipJSONComment(raw, i) - 1
+			next := skipJSONComment(raw, i)
+			if next <= i {
+				return i
+			}
+			i = next - 1
 		case '{', '[':
 			depth++
 		case ']', '}':
@@ -148,10 +148,24 @@ func skipJSONTrivia(raw []byte, start int) int {
 		case ' ', '\t', '\r', '\n':
 			start++
 		case '/':
-			start = skipJSONComment(raw, start)
+			next := skipJSONComment(raw, start)
+			if next <= start {
+				return start
+			}
+			start = next
 		default:
 			return start
 		}
+	}
+	return start
+}
+
+func skipJSONLineEnding(raw []byte, start int) int {
+	if start+1 < len(raw) && raw[start] == '\r' && raw[start+1] == '\n' {
+		return start + 2
+	}
+	if start < len(raw) && raw[start] == '\n' {
+		return start + 1
 	}
 	return start
 }

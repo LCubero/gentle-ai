@@ -66,6 +66,23 @@ func TestMergeJSONObjectsSupportsJSONCBase(t *testing.T) {
 	}
 }
 
+func TestJSONScannersStopAtIsolatedSlash(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		scan func([]byte, int) int
+	}{
+		{"comment", skipJSONComment},
+		{"value delimiter", scanJSONValueDelimiter},
+		{"trivia", skipJSONTrivia},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.scan([]byte("/"), 0); got != 0 {
+				t.Fatalf("scan isolated slash = %d, want 0", got)
+			}
+		})
+	}
+}
+
 func TestMergeJSONObjectsMalformedBaseReturnsOverlayOnly(t *testing.T) {
 	// Real user machines (e.g. Windows) may have a malformed ~/.cursor/mcp.json.
 	// The installer should recover by treating the broken base as {} and continuing.

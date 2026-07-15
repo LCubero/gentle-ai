@@ -162,6 +162,7 @@ func TestInjectRemovesLegacyOpenCodeThemeOnly(t *testing.T) {
 		{"same-line next member after line comment", "{// keep\n\"theme\": \"x\",\"share\": \"disabled\"}", "{// keep\n\"share\": \"disabled\"}"},
 		{"same-line next member after CRLF comment", "{// keep\r\n\"theme\": \"x\",\"share\": \"disabled\"}", "{// keep\r\n\"share\": \"disabled\"}"},
 		{"same-line next member after block comment", "{/*keep*/\"theme\": \"x\",\"share\": \"disabled\"}", "{/*keep*/\"share\": \"disabled\"}"},
+		{"next member after block comment and CRLF", "{/*keep*/\r\n\"theme\":\"x\",\r\n\"share\":\"disabled\"}", "{/*keep*/\r\n\"share\":\"disabled\"}"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := os.WriteFile(settingsPath, []byte(tt.input), 0o600); err != nil {
