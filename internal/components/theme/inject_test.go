@@ -17,13 +17,21 @@ func opencodeAdapter() agents.Adapter { return opencode.NewAdapter() }
 
 type migratingThemeAdapter struct {
 	agents.Adapter
-	path  string
-	calls int
+	path         string
+	settingsPath string
+	calls        int
 }
 
 func (a *migratingThemeAdapter) MigrateThemeSettings(_ string) (string, bool, error) {
 	a.calls++
 	return a.path, true, nil
+}
+
+func (a *migratingThemeAdapter) SettingsPath(homeDir string) string {
+	if a.settingsPath != "" {
+		return a.settingsPath
+	}
+	return a.Adapter.SettingsPath(homeDir)
 }
 
 func TestInjectMergesThemeOverlayIntoAdapterSettings(t *testing.T) {
@@ -143,6 +151,31 @@ func TestInjectContinuesThemeInjectionAfterMigration(t *testing.T) {
 	}
 	if root.Theme != "gentleman-kanagawa" {
 		t.Fatalf("theme = %q, want gentleman-kanagawa", root.Theme)
+	}
+}
+
+func TestInjectPreservesMigrationResultWhenThemeInjectionFails(t *testing.T) {
+	home := t.TempDir()
+	migrationPath := filepath.Join(home, "migration.json")
+	injectionPath := filepath.Join(home, "blocked-settings")
+	if err := os.Mkdir(injectionPath, 0o755); err != nil {
+		t.Fatalf("Mkdir(injection path) error = %v", err)
+	}
+	adapter := &migratingThemeAdapter{
+		Adapter:      claudeAdapter(),
+		path:         migrationPath,
+		settingsPath: injectionPath,
+	}
+
+	result, err := Inject(home, adapter)
+	if err == nil {
+		t.Fatal("Inject() error = nil, want theme injection failure")
+	}
+	if !result.Changed {
+		t.Fatal("Inject() changed = false, want recorded migration change")
+	}
+	if len(result.Files) != 1 || result.Files[0] != migrationPath {
+		t.Fatalf("Inject() files = %#v, want only migration path %q", result.Files, migrationPath)
 	}
 }
 

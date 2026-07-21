@@ -62,7 +62,7 @@ func Inject(homeDir string, adapter agents.Adapter) (InjectionResult, error) {
 
 	writeResult, err := mergeJSONFile(settingsPath, themeOverlayJSON)
 	if err != nil {
-		return InjectionResult{}, err
+		return result, err
 	}
 
 	result.Changed = result.Changed || writeResult.Changed

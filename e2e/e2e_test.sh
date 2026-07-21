@@ -1072,7 +1072,6 @@ EOF
             fi
             builtin command "$@"
         }
-        python3() { return 0; }
         jsonc_has_no_root_key "$fixture/nested.json" "theme"
     ); then
         log_fail "JSONC root-key assertion accepted a missing Node.js runtime"
