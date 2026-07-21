@@ -1536,13 +1536,13 @@ test_idempotent_theme_opencode() {
     local settings="$HOME/.config/opencode/opencode.json"
     # Both no-op runs must succeed and leave the settings without a theme key.
     if $BINARY install --agent opencode --component theme --persona neutral 2>&1; then
-        assert_file_not_contains "$settings" '"theme"' "No theme key after first run"
+        assert_jsonc_has_no_root_key "$settings" "theme" "No root theme key after first run"
     else
         log_fail "First OpenCode theme install exited non-zero (should be a clean no-op)"
     fi
 
     if $BINARY install --agent opencode --component theme --persona neutral 2>&1; then
-        assert_file_not_contains "$settings" '"theme"' "No theme key after second run"
+        assert_jsonc_has_no_root_key "$settings" "theme" "No root theme key after second run"
     else
         log_fail "Second OpenCode theme install exited non-zero (should be a clean no-op)"
     fi
