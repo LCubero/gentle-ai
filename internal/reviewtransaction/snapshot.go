@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type TargetKind string
@@ -21,10 +22,11 @@ type TargetKind string
 type Projection string
 
 const (
-	TargetCurrentChanges TargetKind = "current-changes"
-	TargetBaseDiff       TargetKind = "base-diff"
-	TargetExactRevision  TargetKind = "commit-range"
-	TargetFixDiff        TargetKind = "fix-diff"
+	TargetCurrentChanges       TargetKind = "current-changes"
+	TargetBaseDiff             TargetKind = "base-diff"
+	TargetBaseWorkspaceOverlay TargetKind = "base-workspace-overlay"
+	TargetExactRevision        TargetKind = "commit-range"
+	TargetFixDiff              TargetKind = "fix-diff"
 
 	ProjectionWorkspace Projection = "workspace"
 	ProjectionStaged    Projection = "staged"
@@ -42,6 +44,7 @@ type Target struct {
 type Snapshot struct {
 	Kind                   TargetKind `json:"kind"`
 	Projection             Projection `json:"projection,omitempty"`
+	UnbornHead             bool       `json:"unborn_head,omitempty"`
 	BaseTree               string     `json:"base_tree"`
 	CandidateTree          string     `json:"candidate_tree"`
 	PathsDigest            string     `json:"paths_digest"`
@@ -53,7 +56,8 @@ type Snapshot struct {
 }
 
 type SnapshotBuilder struct {
-	Repo string
+	Repo       string
+	unbornHead bool
 }
 
 var exactObjectPattern = regexp.MustCompile(`^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$`)
@@ -73,7 +77,8 @@ func (builder SnapshotBuilder) build(ctx context.Context, target Target, allowSt
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if projection == ProjectionStaged && target.Kind != TargetCurrentChanges && target.Kind != TargetBaseDiff && target.Kind != TargetFixDiff {
+	if projection == ProjectionStaged && target.Kind != TargetCurrentChanges && target.Kind != TargetBaseDiff && target.Kind != TargetFixDiff &&
+		(target.Kind != TargetBaseWorkspaceOverlay || !allowStagedIntended) {
 		return Snapshot{}, errors.New("staged projection is only supported for current-changes, base-diff, and fix-diff targets")
 	}
 
@@ -120,6 +125,20 @@ func (builder SnapshotBuilder) build(ctx context.Context, target Target, allowSt
 		} else if err == nil {
 			candidateTree, untrackedProof, err = builder.buildHeadWithIntended(ctx, intended)
 		}
+	case TargetBaseWorkspaceOverlay:
+		if strings.TrimSpace(target.BaseRef) == "" || strings.Contains(target.BaseRef, "..") {
+			return Snapshot{}, errors.New("base-workspace-overlay requires one base_ref revision")
+		}
+		if projection == ProjectionStaged && !allowStagedIntended || target.IntendedUntracked == nil {
+			return Snapshot{}, errors.New("base-workspace-overlay requires workspace projection and explicit intended_untracked")
+		}
+		intended, err = canonicalPaths(target.IntendedUntracked)
+		if err == nil {
+			baseTree, err = builder.resolveTree(ctx, target.BaseRef)
+		}
+		if err == nil {
+			_, candidateTree, untrackedProof, err = builder.buildCurrentChanges(ctx, intended, allowStagedIntended, projection)
+		}
 	case TargetExactRevision:
 		baseTree, candidateTree, err = builder.resolveExactRevision(ctx, target.Revision)
 		untrackedProof = hashCanonical("gentle-ai.intended-untracked/v1")
@@ -156,6 +175,7 @@ func (builder SnapshotBuilder) build(ctx context.Context, target Target, allowSt
 	identity := snapshotIdentityForProjection(target.Kind, projection, baseTree, candidateTree, pathsDigest, untrackedProof, intended, ledgerIDs)
 	return Snapshot{
 		Kind: target.Kind, Projection: projection, BaseTree: baseTree, CandidateTree: candidateTree,
+		UnbornHead:  builder.unbornHead,
 		PathsDigest: pathsDigest, IntendedUntracked: intended,
 		IntendedUntrackedProof: untrackedProof, LedgerIDs: ledgerIDs,
 		Paths: paths, Identity: identity,
@@ -237,6 +257,57 @@ func (builder SnapshotBuilder) ValidateEvidence(ctx context.Context, snapshot Sn
 	return nil
 }
 
+func (builder SnapshotBuilder) CandidateLocationSupportsCausality(ctx context.Context, snapshot Snapshot, location string, causality CausalDisposition) (bool, error) {
+	if err := builder.ValidateEvidence(ctx, snapshot); err != nil {
+		return false, err
+	}
+	separator := strings.LastIndex(location, ":")
+	if !findingLocationInGenesis(location, snapshot.Paths) {
+		return false, nil
+	}
+	logicalPath := location[:separator]
+	line, _ := strconv.Atoi(location[separator+1:])
+	if causality == CausalBehaviorActivated {
+		entry, err := runGit(ctx, builder.Repo, nil, nil, "ls-tree", "-z", snapshot.CandidateTree, "--", literalPathspec(logicalPath))
+		if err != nil || len(entry) == 0 {
+			return false, err
+		}
+		for _, tree := range []string{snapshot.CandidateTree} {
+			blob, err := runGit(ctx, builder.Repo, nil, nil, "show", tree+":"+logicalPath)
+			if err != nil {
+				return false, err
+			}
+			lines := bytes.Count(blob, []byte{'\n'})
+			if len(blob) > 0 && blob[len(blob)-1] != '\n' {
+				lines++
+			}
+			if line <= lines {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	if causality != CausalIntroduced && causality != CausalWorsened {
+		return false, nil
+	}
+	output, err := runGit(ctx, builder.Repo, nil, nil, "diff", "--unified=0", "--no-renames", "--no-ext-diff", "--no-textconv", snapshot.BaseTree, snapshot.CandidateTree, "--", literalPathspec(logicalPath))
+	if err != nil {
+		return false, err
+	}
+	for _, match := range regexp.MustCompile(`(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`).FindAllSubmatch(output, -1) {
+		offset := 3
+		start, _ := strconv.Atoi(string(match[offset]))
+		count := 1
+		if len(match[offset+1]) > 0 {
+			count, _ = strconv.Atoi(string(match[offset+1]))
+		}
+		if count > 0 && line >= start && line < start+count {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func rebuildCurrentSnapshotEvidence(ctx context.Context, repo string, snapshot Snapshot) error {
 	if strings.TrimSpace(repo) == "" {
 		return errors.New("repository evidence is required for invalidation")
@@ -247,7 +318,7 @@ func rebuildCurrentSnapshotEvidence(ctx context.Context, repo string, snapshot S
 	}
 	switch snapshot.Kind {
 	case TargetCurrentChanges:
-	case TargetBaseDiff:
+	case TargetBaseDiff, TargetBaseWorkspaceOverlay:
 		target.BaseRef = snapshot.BaseTree
 	default:
 		return errors.New("invalidation supports only live current-changes or base-diff snapshots")
@@ -269,49 +340,118 @@ func (builder SnapshotBuilder) DiffStats(ctx context.Context, snapshot Snapshot)
 	if err != nil {
 		return nil, err
 	}
-	output, err := runGit(ctx, repo, nil, nil, "diff", "--numstat", "--no-renames", snapshot.BaseTree, snapshot.CandidateTree, "--")
+	output, err := runGit(ctx, repo, nil, nil, "diff", "--numstat", "-z", "--no-renames", snapshot.BaseTree, snapshot.CandidateTree, "--")
 	if err != nil {
 		return nil, err
 	}
-	stats := make([]DiffStat, 0, len(snapshot.Paths))
-	seenPaths := make(map[string]struct{}, len(snapshot.Paths))
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		if line == "" {
+	statsByPath := make(map[string]DiffStat, len(snapshot.Paths))
+	for _, record := range bytes.Split(output, []byte{0}) {
+		if len(record) == 0 {
 			continue
 		}
-		fields := strings.Split(line, "\t")
+		fields := bytes.SplitN(record, []byte{'\t'}, 3)
 		if len(fields) != 3 {
-			return nil, fmt.Errorf("unexpected immutable diff stat %q", line)
+			return nil, fmt.Errorf("unexpected immutable diff stat %q", record)
 		}
-		logicalPath, err := normalizeLogicalPath(fields[2])
+		logicalPath, err := normalizeLogicalPath(string(fields[2]))
 		if err != nil {
 			return nil, err
 		}
+		if _, duplicate := statsByPath[logicalPath]; duplicate {
+			return nil, fmt.Errorf("duplicate immutable diff stat path %q", logicalPath)
+		}
 		stat := DiffStat{Path: logicalPath, Generated: isGeneratedGoldenPath(logicalPath)}
-		if fields[0] == "-" && fields[1] == "-" {
+		if bytes.Equal(fields[0], []byte{'-'}) && bytes.Equal(fields[1], []byte{'-'}) {
 			stat.Binary = true
 		} else {
-			stat.Additions, err = strconv.Atoi(fields[0])
+			stat.Additions, err = strconv.Atoi(string(fields[0]))
 			if err != nil {
 				return nil, fmt.Errorf("parse additions for %q: %w", stat.Path, err)
 			}
-			stat.Deletions, err = strconv.Atoi(fields[1])
+			stat.Deletions, err = strconv.Atoi(string(fields[1]))
 			if err != nil {
 				return nil, fmt.Errorf("parse deletions for %q: %w", stat.Path, err)
 			}
 		}
-		stats = append(stats, stat)
-		seenPaths[stat.Path] = struct{}{}
+		statsByPath[stat.Path] = stat
 	}
+	rawOutput, err := runGit(ctx, repo, nil, nil, "diff", "--raw", "-z", "--no-ext-diff", "--no-textconv", "--no-renames", snapshot.BaseTree, snapshot.CandidateTree, "--")
+	if err != nil {
+		return nil, err
+	}
+	modesByPath, err := parseRawDiffModes(rawOutput)
+	if err != nil {
+		return nil, err
+	}
+	stats := make([]DiffStat, 0, len(snapshot.Paths))
 	for _, path := range snapshot.Paths {
-		if _, ok := seenPaths[path]; !ok {
+		stat, ok := statsByPath[path]
+		if !ok {
 			return nil, fmt.Errorf("immutable snapshot path %q is missing from tree diff stats", path)
 		}
+		modes, ok := modesByPath[path]
+		if !ok {
+			return nil, fmt.Errorf("immutable snapshot path %q is missing from raw tree diff", path)
+		}
+		stat.OldMode, stat.NewMode = modes.oldMode, modes.newMode
+		stat.ModeOnly = modes.oldObject == modes.newObject && modes.oldMode != modes.newMode
+		stats = append(stats, stat)
 	}
-	if len(seenPaths) != len(snapshot.Paths) {
+	if len(statsByPath) != len(snapshot.Paths) || len(modesByPath) != len(snapshot.Paths) {
 		return nil, errors.New("immutable tree diff contains paths outside the review snapshot")
 	}
 	return stats, nil
+}
+
+type rawDiffModes struct {
+	oldMode, newMode     string
+	oldObject, newObject string
+}
+
+func parseRawDiffModes(payload []byte) (map[string]rawDiffModes, error) {
+	records := bytes.Split(payload, []byte{0})
+	modes := make(map[string]rawDiffModes, len(records)/2)
+	for index := 0; index < len(records); index++ {
+		header := records[index]
+		if len(header) == 0 {
+			continue
+		}
+		fields := bytes.Fields(header)
+		if len(fields) != 5 || len(fields[0]) != 7 || fields[0][0] != ':' || index+1 >= len(records) || len(records[index+1]) == 0 {
+			return nil, fmt.Errorf("unexpected immutable raw diff record %q", header)
+		}
+		if len(fields[4]) != 1 || !bytes.ContainsAny(fields[4], "ADMT") {
+			return nil, fmt.Errorf("unexpected immutable raw diff status %q", fields[4])
+		}
+		oldMode, newMode := string(fields[0][1:]), string(fields[1])
+		if !validRawGitMode(oldMode) || !validRawGitMode(newMode) {
+			return nil, fmt.Errorf("unexpected immutable raw diff modes %q and %q", oldMode, newMode)
+		}
+		index++
+		logicalPath, err := normalizeLogicalPath(string(records[index]))
+		if err != nil {
+			return nil, err
+		}
+		if _, duplicate := modes[logicalPath]; duplicate {
+			return nil, fmt.Errorf("duplicate immutable raw diff path %q", logicalPath)
+		}
+		modes[logicalPath] = rawDiffModes{
+			oldMode: oldMode, newMode: newMode, oldObject: string(fields[2]), newObject: string(fields[3]),
+		}
+	}
+	return modes, nil
+}
+
+func validRawGitMode(mode string) bool {
+	if len(mode) != 6 {
+		return false
+	}
+	for _, digit := range mode {
+		if digit < '0' || digit > '7' {
+			return false
+		}
+	}
+	return true
 }
 
 func isGeneratedGoldenPath(logicalPath string) bool {
@@ -402,11 +542,12 @@ func canonicalRepositoryPath(path string) (string, error) {
 	return filepath.Clean(resolved), nil
 }
 
-func (builder SnapshotBuilder) buildCurrentChanges(ctx context.Context, intended []string, allowStagedIntended bool, projection Projection) (string, string, string, error) {
-	baseTree, err := builder.resolveTree(ctx, "HEAD")
+func (builder *SnapshotBuilder) buildCurrentChanges(ctx context.Context, intended []string, allowStagedIntended bool, projection Projection) (string, string, string, error) {
+	baseTree, unborn, err := builder.resolveCurrentChangesBase(ctx, projection)
 	if err != nil {
 		return "", "", "", err
 	}
+	builder.unbornHead = unborn
 	indexPathOutput, err := runGit(ctx, builder.Repo, nil, nil, "rev-parse", "--git-path", "index")
 	if err != nil {
 		return "", "", "", fmt.Errorf("locate real index: %w", err)
@@ -416,7 +557,8 @@ func (builder SnapshotBuilder) buildCurrentChanges(ctx context.Context, intended
 		indexPath = filepath.Join(builder.Repo, indexPath)
 	}
 	indexContent, err := os.ReadFile(indexPath)
-	if err != nil {
+	missingIndex := errors.Is(err, os.ErrNotExist)
+	if err != nil && !missingIndex {
 		return "", "", "", fmt.Errorf("read real index: %w", err)
 	}
 
@@ -452,13 +594,20 @@ func (builder SnapshotBuilder) buildCurrentChanges(ctx context.Context, intended
 	}
 	tempIndex := temp.Name()
 	defer os.Remove(tempIndex)
-	if _, err := temp.Write(indexContent); err != nil {
-		return "", "", "", err
-	}
 	if err := temp.Close(); err != nil {
 		return "", "", "", err
 	}
 	env := []string{"GIT_INDEX_FILE=" + tempIndex}
+	if missingIndex {
+		if err := os.Remove(tempIndex); err != nil {
+			return "", "", "", err
+		}
+		if _, err := runGit(ctx, builder.Repo, env, nil, "read-tree", "--empty"); err != nil {
+			return "", "", "", err
+		}
+	} else if err := os.WriteFile(tempIndex, indexContent, 0o600); err != nil {
+		return "", "", "", err
+	}
 	if projection != ProjectionStaged {
 		if _, err := runGit(ctx, builder.Repo, env, nil, "add", "-u", "--", "."); err != nil {
 			return "", "", "", err
@@ -475,6 +624,9 @@ func (builder SnapshotBuilder) buildCurrentChanges(ctx context.Context, intended
 		return "", "", "", err
 	}
 	candidateTree := strings.TrimSpace(string(candidateOutput))
+	if unborn && candidateTree == baseTree {
+		return "", "", "", errors.New("unborn repository has no staged changes; stage the review candidate with git add")
+	}
 	if allowStagedIntended && projection != ProjectionStaged {
 		if _, err := runGit(ctx, builder.Repo, nil, nil, "diff", "--cached", "--quiet", candidateTree, "--"); err != nil {
 			return "", "", "", errors.New("staged tree does not exactly match the complete reviewed candidate")
@@ -485,6 +637,43 @@ func (builder SnapshotBuilder) buildCurrentChanges(ctx context.Context, intended
 		return "", "", "", err
 	}
 	return baseTree, candidateTree, proof, nil
+}
+
+func (builder SnapshotBuilder) resolveCurrentChangesBase(ctx context.Context, projection Projection) (string, bool, error) {
+	baseTree, headErr := builder.resolveTree(ctx, "HEAD")
+	if headErr == nil || projection != ProjectionStaged {
+		return baseTree, false, headErr
+	}
+
+	refOutput, err := runGit(ctx, builder.Repo, nil, nil, "symbolic-ref", "--quiet", "HEAD")
+	if err != nil {
+		return "", false, headErr
+	}
+	ref := strings.TrimSpace(string(refOutput))
+	if !strings.HasPrefix(ref, "refs/heads/") || strings.TrimPrefix(ref, "refs/heads/") == "" {
+		return "", false, headErr
+	}
+	if _, err := runGit(ctx, builder.Repo, nil, nil, "show-ref", "--verify", "--quiet", "--", ref); err == nil {
+		return "", false, headErr
+	} else {
+		var commandErr *GitCommandError
+		if !errors.As(err, &commandErr) || commandErr.ExitCode != 1 {
+			return "", false, err
+		}
+	}
+	emptyTree, err := builder.emptyTree(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	return emptyTree, true, nil
+}
+
+func (builder SnapshotBuilder) emptyTree(ctx context.Context) (string, error) {
+	output, err := runGit(ctx, builder.Repo, nil, []byte{}, "mktree")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 func (builder SnapshotBuilder) resolveExactRevision(ctx context.Context, revision string) (string, string, error) {
@@ -689,7 +878,9 @@ func snapshotIdentity(kind TargetKind, baseTree, candidateTree, pathsDigest, pro
 
 func snapshotIdentityForProjection(kind TargetKind, projection Projection, baseTree, candidateTree, pathsDigest, proof string, intended, ledgerIDs []string) string {
 	hash := sha256.New()
-	if projection == ProjectionStaged {
+	if kind == TargetBaseWorkspaceOverlay {
+		hash.Write([]byte("gentle-ai.review-snapshot/base-workspace-overlay/v1\x00"))
+	} else if projection == ProjectionStaged {
 		hash.Write([]byte("gentle-ai.review-snapshot/v2\x00"))
 	} else {
 		hash.Write([]byte("gentle-ai.review-snapshot/v1\x00"))
@@ -726,15 +917,137 @@ func writeLengthPrefixed(writer byteWriter, value []byte) {
 	_, _ = writer.Write([]byte{0})
 }
 
+var ErrGitCommandTimeout = errors.New("git command timed out")
+
+type GitCommandTimeoutError struct {
+	Args      []string
+	Timeout   time.Duration
+	Remote    bool
+	Aggregate bool
+	Cause     error
+}
+
+func (err *GitCommandTimeoutError) Error() string {
+	scope := "local"
+	if err.Remote {
+		scope = "remote"
+	}
+	if err.Aggregate {
+		scope = "aggregate"
+	}
+	return fmt.Sprintf("%v within %s %s budget", ErrGitCommandTimeout, err.Timeout, scope)
+}
+
+func (err *GitCommandTimeoutError) Unwrap() []error {
+	causes := []error{ErrGitCommandTimeout}
+	if err.Cause != nil {
+		causes = append(causes, err.Cause)
+	}
+	return causes
+}
+
+type GitCommandError struct {
+	Args     []string
+	ExitCode int
+	Remote   bool
+	Cause    error
+	Output   string
+}
+
+func (err *GitCommandError) Error() string {
+	message := fmt.Sprintf("git %s failed with exit code %d", strings.Join(err.Args, " "), err.ExitCode)
+	if err.Output != "" {
+		message += ": " + err.Output
+	}
+	return message
+}
+
+func (err *GitCommandError) Unwrap() error { return err.Cause }
+
+// GitProcessControlError reports that a git subprocess could not be started or
+// its process tree could not be brought under control before it produced any
+// result, e.g. Windows job-object or NtResumeProcess failures. It carries the
+// underlying cause so failure envelopes stay diagnosable.
+type GitProcessControlError struct {
+	Args  []string
+	Cause error
+}
+
+func (err *GitProcessControlError) Error() string {
+	return fmt.Sprintf("git %s subprocess start or process-tree control failed: %v", strings.Join(err.Args, " "), err.Cause)
+}
+
+func (err *GitProcessControlError) Unwrap() error { return err.Cause }
+
+var localGitCommandTimeout = 15 * time.Second
+var remoteGitCommandTimeout = 20 * time.Second
+var gitCommandWaitDelay = time.Second
+var gitCommandContext = exec.CommandContext
+var gitProcessTreeStarter = startGitProcessTree
+
 func runGit(ctx context.Context, repo string, extraEnv []string, stdin []byte, args ...string) ([]byte, error) {
-	command := exec.CommandContext(ctx, "git", append([]string{"--no-replace-objects", "-C", repo}, args...)...)
+	remote := len(args) > 0 && args[0] == "ls-remote"
+	timeout := localGitCommandTimeout
+	if remote {
+		timeout = remoteGitCommandTimeout
+	}
+	commandContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	command := gitCommandContext(commandContext, "git", append([]string{"--no-replace-objects", "-C", repo}, args...)...)
+	command.Cancel = nil
+	command.WaitDelay = gitCommandWaitDelay
 	command.Env = sanitizedGitEnvironment(os.Environ(), extraEnv)
 	if stdin != nil {
 		command.Stdin = bytes.NewReader(stdin)
 	}
-	output, err := command.CombinedOutput()
+	var buffer bytes.Buffer
+	command.Stdout, command.Stderr = &buffer, &buffer
+	release, startErr := gitProcessTreeStarter(command)
+	err := startErr
+	if err == nil {
+		released := make(chan struct{})
+		stopRelease := context.AfterFunc(commandContext, func() { _ = release(); close(released) })
+		err = command.Wait()
+		if stopRelease() {
+			_ = release()
+		} else {
+			<-released
+		}
+	}
+	if err != nil && release != nil && command.ProcessState == nil {
+		_ = release()
+	}
+	if err != nil && command.Process != nil && command.ProcessState == nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+	}
+	output := buffer.Bytes()
+	if errors.Is(err, exec.ErrWaitDelay) && commandContext.Err() == nil {
+		err = nil
+	}
 	if err != nil {
-		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		if commandContext.Err() != nil {
+			cause := commandContext.Err()
+			aggregate := ctx.Err() != nil
+			if aggregate {
+				cause = ctx.Err()
+			}
+			return nil, &GitCommandTimeoutError{
+				Args: append([]string{}, args...), Timeout: timeout, Remote: remote, Aggregate: aggregate, Cause: cause,
+			}
+		}
+		if startErr != nil {
+			return nil, &GitProcessControlError{Args: append([]string{}, args...), Cause: startErr}
+		}
+		exitCode := -1
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+		return nil, &GitCommandError{
+			Args: append([]string{}, args...), ExitCode: exitCode, Remote: remote, Cause: err,
+			Output: strings.TrimSpace(string(output)),
+		}
 	}
 	return output, nil
 }

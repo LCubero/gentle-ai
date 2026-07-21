@@ -23,6 +23,16 @@ const reviewBindingSchema = "gentle-ai.sdd-review-binding/v1"
 var reviewBindingChange = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 var reviewBindingHash = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 var bindingFinalAuthorizationHook = func() {}
+var bindingRename = reviewtransaction.ReplaceFileAtomic
+var syncBindingDirectory = reviewtransaction.SyncReviewDirectory
+
+type ReviewBindingPublicationError struct{ Cause error }
+
+func (err *ReviewBindingPublicationError) Error() string {
+	return fmt.Sprintf("SDD review binding publication requires exact replay: %v", err.Cause)
+}
+
+func (err *ReviewBindingPublicationError) Unwrap() error { return err.Cause }
 
 type ReviewBinding struct {
 	Schema            string                        `json:"schema"`
@@ -51,6 +61,14 @@ func BindApprovedReview(ctx context.Context, repo, change, lineage, expected str
 		return ReviewBinding{}, err
 	}
 	record, err := store.Load()
+	if errors.Is(err, os.ErrNotExist) {
+		legacy, legacyErr := reviewtransaction.AuthoritativeStore(ctx, root, lineage)
+		if legacyErr == nil {
+			if _, legacyLoadErr := legacy.LoadChain(); legacyLoadErr == nil {
+				return ReviewBinding{}, reviewtransaction.NewLegacyReadOnlyError("review/bind-sdd", lineage)
+			}
+		}
+	}
 	if err != nil || record.State.State != reviewtransaction.StateApproved {
 		return ReviewBinding{}, errors.New("explicit compact authority is not approved")
 	}
@@ -131,7 +149,7 @@ func validateBoundReview(ctx context.Context, repo, change string) (ReviewBindin
 		return ReviewBinding{}, reviewtransaction.NativeGateEvaluation{}, err
 	}
 	evaluation := reviewtransaction.EvaluateCompactGate(ctx, root, receipt, reviewtransaction.NativeGateRequestInput{Gate: reviewtransaction.GatePostApply, LineageID: binding.Lineage})
-	if evaluation.Result != reviewtransaction.GateAllow || !reflect.DeepEqual(evaluation.Context, binding.GateContext) {
+	if evaluation.Result != reviewtransaction.GateAllow || !boundGateContextMatches(binding.GateContext, evaluation.Context) {
 		return ReviewBinding{}, reviewtransaction.NativeGateEvaluation{}, errors.New("bound compact post-apply gate context changed")
 	}
 	bindingFinalAuthorizationHook()
@@ -148,10 +166,33 @@ func validateBoundReview(ctx context.Context, repo, change string) (ReviewBindin
 		return ReviewBinding{}, reviewtransaction.NativeGateEvaluation{}, errors.New("bound compact receipt does not match final authority")
 	}
 	finalGate := reviewtransaction.EvaluateCompactGate(ctx, root, finalReceiptValue, reviewtransaction.NativeGateRequestInput{Gate: reviewtransaction.GatePostApply, LineageID: binding.Lineage})
-	if finalGate.Result != reviewtransaction.GateAllow || !reflect.DeepEqual(finalGate.Context, binding.GateContext) {
+	if finalGate.Result != reviewtransaction.GateAllow || !boundGateContextMatches(binding.GateContext, finalGate.Context) {
 		return ReviewBinding{}, reviewtransaction.NativeGateEvaluation{}, errors.New("bound compact post-apply gate changed during final authorization")
 	}
 	return binding, finalGate, nil
+}
+
+// boundGateContextMatches compares a persisted binding gate context against
+// the live post-apply evaluation. Bindings persisted before compact gate
+// contexts bound the frozen findings ledger recorded the empty-input hash in
+// ledger_hash; they stay valid against a now-populated live context because
+// the findings ledger itself is still pinned by the authority state through
+// AuthorityRevision and ReceiptHash. Every other divergence — including any
+// non-empty ledger hash that does not match the live binding — still fails.
+// The reverse mix is a known residual this side cannot repair: a binding
+// written by a ledger-binding binary but validated by an older binary
+// deterministically fails closed here ("bound compact post-apply gate context
+// changed"), because the older binary hardcodes the empty hash in its live
+// context; the remedy is upgrading that older binary.
+func boundGateContextMatches(bound, live reviewtransaction.GateContext) bool {
+	if reflect.DeepEqual(bound, live) {
+		return true
+	}
+	if bound.LedgerHash != reviewtransaction.EmptyFixDeltaHash {
+		return false
+	}
+	bound.LedgerHash = live.LedgerHash
+	return reflect.DeepEqual(bound, live)
 }
 
 func bindingExists(ctx context.Context, repo, change string) (bool, error) {
@@ -364,6 +405,9 @@ func writeBinding(path, expected string, binding ReviewBinding) error {
 		}
 		current = old.Revision
 		if current == binding.Revision {
+			if err := syncBindingDirectory(filepath.Dir(path)); err != nil {
+				return &ReviewBindingPublicationError{Cause: fmt.Errorf("sync SDD review binding directory: %w", err)}
+			}
 			return nil
 		}
 	} else if !os.IsNotExist(err) {
@@ -380,6 +424,7 @@ func writeBinding(path, expected string, binding ReviewBinding) error {
 	if err != nil {
 		return err
 	}
+	defer os.Remove(temp.Name())
 	if _, err = temp.Write(payload); err == nil {
 		err = temp.Sync()
 	}
@@ -390,5 +435,11 @@ func writeBinding(path, expected string, binding ReviewBinding) error {
 		_ = os.Remove(temp.Name())
 		return err
 	}
-	return os.Rename(temp.Name(), path)
+	if err := bindingRename(temp.Name(), path); err != nil {
+		return err
+	}
+	if err := syncBindingDirectory(filepath.Dir(path)); err != nil {
+		return &ReviewBindingPublicationError{Cause: fmt.Errorf("sync SDD review binding directory: %w", err)}
+	}
+	return nil
 }

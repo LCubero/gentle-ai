@@ -63,10 +63,11 @@ These are orchestrator stop rules for Antigravity. Once any trigger fires, the o
 
 1. **4-file rule**: if understanding requires reading 4+ files, invoke an exploration/mapping phase before implementation.
 2. **Multi-file write rule**: if implementation will touch 2+ non-trivial files, require an explicit apply phase and verify phase boundary.
-3. **Lifecycle receipt rule**: before commit, stage every reviewed path without changing content or mode, then run native `gentle-ai review validate --gate pre-commit --cwd <repo>` for the same content-bound receipt; before push, PR, or release, run the corresponding native `gentle-ai review validate --gate <gate> --cwd <repo>`. Let the facade discover authority and artifacts, follow missing/scope-changed/invalidated/escalated action, and never launch a lens, Judgment Day, or new budget at the gate.
+3. **Lifecycle receipt rule**: bootstrap exactly once with `gentle-ai review status --cwd <repo> --contract gentle-ai.review-integration/v1 --next-transition`. Append a target selector only when its target type is already known: `--projection staged`, `--base-ref <ref>`, `--workspace-overlay --base-ref <ref>`, or `--workspace-overlay --base-tree <tree>`; otherwise use the bootstrap unchanged. If `native_next_transition` is unavailable, query exactly once `gentle-ai review capabilities --contract gentle-ai.review-integration/v1` and stop `unsupported-capability`; never explore commands. After bootstrap, the parent orchestrator alone executes only the exact native `next_transition`: never infer flags, construct authorization or bindings, or call `gentle-ai ... --help` during lifecycle routing. Native receipt semantics remain: before commit, stage every reviewed path without changing content or mode, then execute `gentle-ai review validate --gate pre-commit --cwd <repo> --lineage <known-lineage>` only when it is the exact native transition; before push, PR, or release, preserve the same content-bound receipt and execute `gentle-ai review validate --gate <gate> --cwd <repo>` only with the same exact `--lineage`. Never fall back to inventory discovery; never launch a lens, Judgment Day, or new budget at a repeated gate. Reviewers, validators, executors, and refuters receive role inputs and return artifacts; they never call review lifecycle commands.
 4. **Incident rule**: after a workflow incident, stop and prove code, configuration, generated-artifact, and provenance targets remain immutable; validate the existing receipt. Any changed target requires explicit scope action, not reopened review.
 5. **Long-session rule**: after roughly 20 tool calls, 5 exploratory file reads, or 2 non-mechanical edits without a phase boundary and growing complexity, pause and re-plan instead of silently continuing monolithically.
 6. **Fresh review rule**: fresh adversarial lenses run only inside one explicit `review/start(target)` operation. Final verification checks requirements/runtime independently and never reopens the code review.
+7. **Normalization ordering rule**: before review START and its identity freeze, run every source-mutating normalizer, then re-snapshot the candidate and review those exact bytes, paths, and modes. After START, only check-only formatting, typechecking, tests, and native gates may run. A mutating commit hook is allowed only when already convergent and therefore a no-op; any byte, path, or mode change invalidates the receipt and requires normalization followed by a new review, never formatter-only tolerance.
 
 #### Review Lens Selection
 
@@ -74,7 +75,8 @@ These are orchestrator stop rules for Antigravity. Once any trigger fires, the o
 
 1. **Trivial diff** (ONLY documentation, comments, formatting, or typo fixes in strings — zero executable code and zero configuration changes): run no lens. Any diff touching executable code or configuration is at least standard tier.
 2. **Standard diff**: run exactly ONE lens — the row in the table below that matches the dominant risk. If multiple rows match, pick the single highest-impact row; do not add lenses.
-3. **Hot path** (the diff touches auth/update/security/payments paths) **or >400 changed lines**: run the full 4R set — `review-risk`, `review-resilience`, `review-readability`, `review-reliability`.
+3. **Hot path** (the diff touches auth/update/security/payments paths) **or >400 changed lines outside pure human documentation**: run the full 4R set — `review-risk`, `review-resilience`, `review-readability`, `review-reliability`.
+4. **Large pure human documentation** (>400 authored lines with no code, configuration, prompts, agent rules, workflows, runtime instruction docs, mixed content, or active content): run only `review-readability`.
 
 | Risk signal | Review lens |
 | --- | --- |
@@ -111,6 +113,8 @@ If the first pass finds nothing, persist an empty ledger record rather than skip
 **Severity floor.** Only BLOCKER/CRITICAL findings that survive adversarial verification enter the fix → re-review loop. WARNING/SUGGESTION findings are reported once with status `info`, are never re-reviewed, and never block. Judgment-day may record real/theoretical as a separate `assessment`, but canonical severity remains `WARNING` and canonical status remains `info`; a WARNING is never `open`.
 
 **Convergence budget.** Maximum 2 fix rounds per review. One fix round = the orchestrator (directly or via a single writer sub-agent) applies fixes for all open verified BLOCKER/CRITICAL findings, then a scoped re-review verifies the fix diff against the ledger; in judgment-day the fix actor is `jd-fix-agent`. Anything still open after round 2 is reported to the user as open — the loop never extends.
+
+**Ad-hoc severe recheck.** Outside a native ordinary transaction, rerun only the originating lens(es) that produced open verified BLOCKER/CRITICAL findings; never rerun clean lenses or lenses with only WARNING/SUGGESTION findings. Native ordinary review keeps its targeted validator and never reruns initial lenses.
 
 **Ledger persistence honors the artifact store.**
 - `openspec`: write `openspec/changes/{change-name}/review-ledger.md`.
@@ -178,7 +182,7 @@ Do NOT skip this check. Do NOT ask the user — just run init silently if needed
 
 ### Execution Mode
 
-When the user invokes `/sdd-new`, `/sdd-ff`, or `/sdd-continue` (or an equivalent natural-language request, e.g. "haceme un SDD para X" / "do SDD for X") for the first time in a session, ASK which execution mode they prefer:
+When the user invokes `/sdd-new`, `/sdd-ff`, or `/sdd-continue` (or an equivalent natural-language request, e.g. "create an SDD for X" / "do SDD for X") for the first time in a session, ASK which execution mode they prefer:
 
 - **Automatic** (`auto`): Run all phases sequentially without pausing. Phases still run back-to-back WITHOUT interrupting the user, BUT the orchestrator runs a gatekeeper validation after every phase before invoking the next dynamic subagent — the user only sees an interruption when the gatekeeper catches a real problem. Otherwise only the final result is shown. Use this when the user wants speed and trusts the process.
 - **Interactive** (`interactive`): After each phase completes, show the result summary and ASK: "Want to adjust anything or continue?" before proceeding to the next phase. Use this when the user wants to review and steer each step.

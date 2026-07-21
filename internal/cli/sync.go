@@ -22,6 +22,7 @@ import (
 	"github.com/gentleman-programming/gentle-ai/internal/components/filemerge"
 	"github.com/gentleman-programming/gentle-ai/internal/components/gga"
 	"github.com/gentleman-programming/gentle-ai/internal/components/mcp"
+	"github.com/gentleman-programming/gentle-ai/internal/components/opencodeplugin"
 	"github.com/gentleman-programming/gentle-ai/internal/components/permissions"
 	"github.com/gentleman-programming/gentle-ai/internal/components/persona"
 	"github.com/gentleman-programming/gentle-ai/internal/components/sdd"
@@ -487,6 +488,22 @@ func (r *syncRuntime) stagePlan() pipeline.StagePlan {
 		})
 	}
 
+	// Managed OpenCode-compatible plugins are versioned runtime artifacts tied
+	// to the installed binary (OpenCode and Kilocode receive them). When the
+	// persisted selection lacks the SDD component, no SDD step is planned and
+	// already-installed plugins would silently stay stale after upgrades
+	// (issue #1440). Refresh installed copies explicitly; the step never
+	// installs plugins that were never present. When SDD is selected, its
+	// inject step already rewrites the plugins.
+	if anyAgentReceivesManagedOpenCodePlugins(r.agentIDs) && !r.selection.HasComponent(model.ComponentSDD) {
+		apply = append(apply, openCodePluginRefreshSyncStep{
+			id:           "sync:opencode:managed-plugins",
+			homeDir:      r.homeDir,
+			agents:       r.agentIDs,
+			changedFiles: &r.changedFiles,
+		})
+	}
+
 	if r.selection.HasCommunityTool(model.CommunityToolCodeGraph) {
 		apply = append(apply, &codeGraphGuidanceSyncStep{
 			id:           "sync:community-tool:codegraph-guidance",
@@ -509,6 +526,19 @@ func syncBackupTargets(homeDir, workspaceDir string, selection model.Selection, 
 	for _, component := range selection.Components {
 		for _, path := range syncComponentPathsWithWorkspace(homeDir, workspaceDir, selection, adapters, component) {
 			paths[path] = struct{}{}
+		}
+	}
+	// Managed OpenCode-compatible plugin paths are part of sync's
+	// backup/snapshot contract whenever a plugin-receiving agent (OpenCode,
+	// Kilocode) is synced, independent of the SDD component: the
+	// openCodePluginRefreshSyncStep may rewrite installed copies (issue #1440).
+	for _, adapter := range adapters {
+		if !sdd.AgentReceivesManagedOpenCodePlugins(adapter.Agent()) {
+			continue
+		}
+		pluginsDir := filepath.Join(adapter.GlobalConfigDir(homeDir), "plugins")
+		for _, name := range sdd.ManagedOpenCodePluginNames() {
+			paths[filepath.Join(pluginsDir, name)] = struct{}{}
 		}
 	}
 	if selection.HasCommunityTool(model.CommunityToolCodeGraph) {
@@ -635,6 +665,46 @@ type codeGraphGuidanceSyncStep struct {
 type piCodeGraphSyncStep struct {
 	id, homeDir, workspaceDir string
 	changedFiles              *[]string
+}
+
+// openCodePluginRefreshSyncStep refreshes already-installed managed
+// OpenCode-compatible plugins (OpenCode, Kilocode) from the embedded assets
+// when the SDD component is not part of the sync selection (issue #1440).
+// It never creates plugins that were never installed.
+type openCodePluginRefreshSyncStep struct {
+	id           string
+	homeDir      string
+	agents       []model.AgentID
+	changedFiles *[]string
+}
+
+func (s openCodePluginRefreshSyncStep) ID() string { return s.id }
+
+func (s openCodePluginRefreshSyncStep) Run() error {
+	for _, adapter := range resolveAdapters(s.agents) {
+		if !sdd.AgentReceivesManagedOpenCodePlugins(adapter.Agent()) {
+			continue
+		}
+		res, err := sdd.RefreshInstalledOpenCodePlugins(s.homeDir, adapter)
+		if err != nil {
+			return fmt.Errorf("sync managed OpenCode plugins: %w", err)
+		}
+		if s.changedFiles != nil && res.Changed {
+			*s.changedFiles = append(*s.changedFiles, res.Files...)
+		}
+	}
+	return nil
+}
+
+// anyAgentReceivesManagedOpenCodePlugins reports whether any synced agent
+// receives the managed OpenCode-compatible plugins from the SDD injector.
+func anyAgentReceivesManagedOpenCodePlugins(agentIDs []model.AgentID) bool {
+	for _, id := range agentIDs {
+		if sdd.AgentReceivesManagedOpenCodePlugins(id) {
+			return true
+		}
+	}
+	return false
 }
 
 var refreshPiCodeGraphIfConfigured = communitytool.RefreshPiCodeGraphIfConfigured
@@ -923,8 +993,25 @@ func (s componentSyncStep) Run() error {
 		}
 		return nil
 
+	case model.ComponentClaudeTheme:
+		for _, adapter := range adapters {
+			res, err := theme.InjectClaudeTheme(s.homeDir, adapter)
+			if err != nil {
+				return fmt.Errorf("sync Claude theme for %q: %w", adapter.Agent(), err)
+			}
+			s.countChanged(boolToInt(res.Changed), res.Files...)
+		}
+		return nil
+
+	case model.ComponentOpenCodeGentleLogo:
+		res, err := opencodeplugin.Install(s.homeDir, model.OpenCodePluginGentleLogo)
+		if err != nil {
+			return fmt.Errorf("sync OpenCode Gentle Logo plugin: %w", err)
+		}
+		s.countChanged(boolToInt(res.Changed), res.Files...)
+		return nil
+
 	default:
-		// Persona and any unknown components are out of sync scope.
 		return fmt.Errorf("component %q is not supported in sync runtime", s.component)
 	}
 }
@@ -1400,7 +1487,7 @@ func restorePersistedCommunityTools(homeDir string, selection *model.Selection, 
 func hasManagedPiCodeGraphManifest(homeDir string) bool {
 	path := filepath.Join(homeDir, ".gentle-ai", "pi-codegraph.json")
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || !info.Mode().IsRegular() || runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		return false
 	}
 	data, err := os.ReadFile(path)
