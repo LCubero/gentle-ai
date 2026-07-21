@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/gentleman-programming/gentle-ai/internal/agents"
@@ -13,6 +14,17 @@ import (
 
 func claudeAdapter() agents.Adapter   { return claude.NewAdapter() }
 func opencodeAdapter() agents.Adapter { return opencode.NewAdapter() }
+
+type migratingThemeAdapter struct {
+	agents.Adapter
+	path  string
+	calls int
+}
+
+func (a *migratingThemeAdapter) MigrateThemeSettings(_ string) (string, bool, error) {
+	a.calls++
+	return a.path, true, nil
+}
 
 func TestInjectMergesThemeOverlayIntoAdapterSettings(t *testing.T) {
 	home := t.TempDir()
@@ -97,6 +109,43 @@ func TestInjectCreatesAdapterSettingsWhenMissing(t *testing.T) {
 	}
 }
 
+func TestInjectContinuesThemeInjectionAfterMigration(t *testing.T) {
+	home := t.TempDir()
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	adapter := &migratingThemeAdapter{
+		Adapter: claudeAdapter(),
+		path:    settingsPath,
+	}
+
+	result, err := Inject(home, adapter)
+	if err != nil {
+		t.Fatalf("Inject() error = %v", err)
+	}
+	if adapter.calls != 1 {
+		t.Fatalf("MigrateThemeSettings() calls = %d, want 1", adapter.calls)
+	}
+	if !result.Changed {
+		t.Fatal("Inject() changed = false, want migration and theme injection")
+	}
+	if len(result.Files) != 1 || result.Files[0] != settingsPath {
+		t.Fatalf("Inject() files = %#v, want unique settings path %q", result.Files, settingsPath)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(settings) error = %v", err)
+	}
+	var root struct {
+		Theme string `json:"theme"`
+	}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatalf("Unmarshal(settings) error = %v", err)
+	}
+	if root.Theme != "gentleman-kanagawa" {
+		t.Fatalf("theme = %q, want gentleman-kanagawa", root.Theme)
+	}
+}
+
 func TestInjectSkipsOpenCodeThemeInjection(t *testing.T) {
 	home := t.TempDir()
 
@@ -141,12 +190,14 @@ func TestInjectRemovesLegacyOpenCodeThemeOnly(t *testing.T) {
 	if string(got) != want {
 		t.Fatalf("settings after migration =\n%s\nwant only root theme removed:\n%s", got, want)
 	}
-	info, err := os.Stat(settingsPath)
-	if err != nil {
-		t.Fatalf("Stat(settings) error = %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("settings mode = %o, want preserved 600", got)
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(settingsPath)
+		if err != nil {
+			t.Fatalf("Stat(settings) error = %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("settings mode = %o, want preserved 600", got)
+		}
 	}
 
 	second, err := Inject(home, opencodeAdapter())

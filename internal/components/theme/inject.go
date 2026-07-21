@@ -40,22 +40,24 @@ var gentlemanClaudeTheme = claudeTheme{
 }
 
 func Inject(homeDir string, adapter agents.Adapter) (InjectionResult, error) {
+	result := InjectionResult{}
 	if migrator, ok := adapter.(agents.ThemeSettingsMigrator); ok {
 		path, changed, err := migrator.MigrateThemeSettings(homeDir)
 		if err != nil {
 			return InjectionResult{}, err
 		}
 		if changed {
-			return InjectionResult{Changed: true, Files: []string{path}}, nil
+			result.Changed = true
+			result.Files = appendUniquePath(result.Files, path)
 		}
 	}
 	if !agents.SupportsThemeInjection(adapter) {
-		return InjectionResult{}, nil
+		return result, nil
 	}
 
 	settingsPath := adapter.SettingsPath(homeDir)
 	if settingsPath == "" {
-		return InjectionResult{}, nil
+		return result, nil
 	}
 
 	writeResult, err := mergeJSONFile(settingsPath, themeOverlayJSON)
@@ -63,7 +65,21 @@ func Inject(homeDir string, adapter agents.Adapter) (InjectionResult, error) {
 		return InjectionResult{}, err
 	}
 
-	return InjectionResult{Changed: writeResult.Changed, Files: []string{settingsPath}}, nil
+	result.Changed = result.Changed || writeResult.Changed
+	result.Files = appendUniquePath(result.Files, settingsPath)
+	return result, nil
+}
+
+func appendUniquePath(paths []string, path string) []string {
+	if path == "" {
+		return paths
+	}
+	for _, existing := range paths {
+		if existing == path {
+			return paths
+		}
+	}
+	return append(paths, path)
 }
 
 func InjectClaudeTheme(homeDir string, adapter agents.Adapter) (InjectionResult, error) {

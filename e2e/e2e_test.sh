@@ -1023,6 +1023,66 @@ test_oc_permissions_injection() {
     fi
 }
 
+test_jsonc_root_key_helper() {
+    log_test "JSONC root-key assertion accepts valid configs without a root theme"
+    local fixture missing_fixture
+    fixture=$(mktemp -d)
+    missing_fixture="$fixture/missing.json"
+
+    assert_jsonc_has_no_root_key "$missing_fixture" "theme" "Absent opencode.json is accepted"
+
+    cat > "$fixture/nested.json" <<'EOF'
+{
+  // Nested theme is valid for an OpenCode agent definition.
+  "agent": {
+    "reviewer": {
+      /* Comment-like text in strings must remain intact. */
+      "prompt": "https://example.test//path/*literal*/",
+      "theme": "nested-theme",
+    },
+  },
+}
+EOF
+
+    assert_jsonc_has_no_root_key "$fixture/nested.json" "theme" "Nested theme and JSONC syntax are accepted"
+
+    cat > "$fixture/root.json" <<'EOF'
+{
+  "theme": "root-theme",
+  "agent": {"reviewer": {"theme": "nested-theme"}},
+}
+EOF
+    if jsonc_has_no_root_key "$fixture/root.json" "theme"; then
+        log_fail "JSONC root-key assertion accepted root theme"
+    else
+        log_pass "JSONC root-key assertion rejects root theme"
+    fi
+
+    printf '{"agent": ' > "$fixture/malformed.json"
+    if jsonc_has_no_root_key "$fixture/malformed.json" "theme"; then
+        log_fail "JSONC root-key assertion accepted malformed JSONC"
+    else
+        log_pass "JSONC root-key assertion rejects malformed JSONC"
+    fi
+
+    if (
+        command() {
+            if [ "$1" = "-v" ] && [ "$2" = "node" ]; then
+                return 1
+            fi
+            builtin command "$@"
+        }
+        python3() { return 0; }
+        jsonc_has_no_root_key "$fixture/nested.json" "theme"
+    ); then
+        log_fail "JSONC root-key assertion accepted a missing Node.js runtime"
+    else
+        log_pass "JSONC root-key assertion fails closed when Node.js is unavailable"
+    fi
+
+    rm -rf "$fixture"
+}
+
 test_oc_theme_injection() {
     log_test "OpenCode: theme injection skipped (opencode.json rejects top-level theme)"
     cleanup_test_env
@@ -1032,8 +1092,7 @@ test_oc_theme_injection() {
         # OpenCode's opencode.json schema is strict and rejects an unrecognized
         # top-level "theme" key (ConfigInvalidError), so Gentle AI must not write
         # it there. Theme injection is a no-op for OpenCode — see issue #497.
-        assert_file_not_contains "$settings" '"theme"' "opencode.json has no top-level theme key"
-        assert_file_not_contains "$settings" 'gentleman-kanagawa' "opencode.json has no gentleman-kanagawa theme"
+        assert_jsonc_has_no_root_key "$settings" "theme" "opencode.json has no root theme key"
     else
         log_fail "OpenCode theme install command failed"
     fi
@@ -1094,7 +1153,7 @@ test_full_preset_opencode() {
         # opencode.json should have all overlays merged
         assert_file_exists "$settings" "OpenCode opencode.json"
         assert_file_contains "$settings" '"permission"' "Has permission config"
-        assert_file_not_contains "$settings" '"theme"' "opencode.json has no top-level theme key"
+        assert_jsonc_has_no_root_key "$settings" "theme" "opencode.json has no root theme key"
         assert_file_contains "$settings" '"mcp"' "Has MCP servers"
         assert_file_contains "$settings" '"context7"' "Has context7 MCP"
         assert_valid_json "$settings" "opencode.json is valid JSON"
@@ -2271,6 +2330,7 @@ if [ "${RUN_FULL_E2E:-0}" = "1" ]; then
     test_oc_skills_full
     test_oc_context7_injection
     test_oc_permissions_injection
+    test_jsonc_root_key_helper
     test_oc_theme_injection
 
     # Category 4: Full preset integration

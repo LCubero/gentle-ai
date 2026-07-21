@@ -280,6 +280,104 @@ assert_valid_json() {
     fi
 }
 
+# jsonc_has_no_root_key FILE KEY
+# Returns success when a JSONC object does not contain KEY at its root while
+# allowing the same key in nested objects.
+jsonc_has_no_root_key() {
+    local file="$1"
+    local key="$2"
+    if [ ! -f "$file" ]; then
+        return 0
+    fi
+    if ! command -v node >/dev/null 2>&1; then
+        printf 'Node.js is required for JSONC root-key assertions. Check the E2E image setup.\n' >&2
+        return 2
+    fi
+    node - "$file" "$key" <<'JS'
+const fs = require("fs");
+
+const raw = fs.readFileSync(process.argv[2], "utf8");
+function nextToken(source, index) {
+    while (index < source.length) {
+        const char = source[index];
+        if (/\s/.test(char)) {
+            index += 1;
+        } else if (char === "/" && source[index + 1] === "/") {
+            index = source.indexOf("\n", index + 2);
+            if (index < 0) return "";
+        } else if (char === "/" && source[index + 1] === "*") {
+            index = source.indexOf("*/", index + 2);
+            if (index < 0) throw new Error("unterminated block comment");
+            index += 2;
+        } else {
+            return char;
+        }
+    }
+    return "";
+}
+
+try {
+    const normalized = [];
+    let inString = false;
+    let escaped = false;
+
+    for (let index = 0; index < raw.length; index += 1) {
+        const char = raw[index];
+        if (inString) {
+            normalized.push(char);
+            if (char === '"' && !escaped) inString = false;
+            escaped = char === "\\" && !escaped;
+        } else if (char === '"') {
+            inString = true;
+            normalized.push(char);
+        } else if (char === "/" && raw[index + 1] === "/") {
+            index = raw.indexOf("\n", index + 2);
+            if (index < 0) break;
+            normalized.push("\n");
+        } else if (char === "/" && raw[index + 1] === "*") {
+            const end = raw.indexOf("*/", index + 2);
+            if (end < 0) throw new Error("unterminated block comment");
+            for (const commentChar of raw.slice(index, end + 2)) {
+                if (commentChar === "\r" || commentChar === "\n") normalized.push(commentChar);
+            }
+            index = end + 1;
+        } else if (char !== "," || !/[}\]]/.test(nextToken(raw, index + 1))) {
+            normalized.push(char);
+        }
+    }
+
+    const root = JSON.parse(normalized.join(""));
+    if (root === null || Array.isArray(root) || typeof root !== "object") {
+        throw new Error("root is not an object");
+    }
+    process.exit(Object.hasOwn(root, process.argv[3]) ? 1 : 0);
+} catch (error) {
+    console.error(`Invalid JSONC in ${process.argv[2]}: ${error.message}`);
+    process.exit(2);
+}
+JS
+}
+
+# assert_jsonc_has_no_root_key FILE KEY LABEL
+# Checks that a JSONC object does not contain KEY at its root while allowing
+# the same key in nested objects.
+assert_jsonc_has_no_root_key() {
+    local file="$1"
+    local key="$2"
+    local label="${3:-$file has no root key '$key'}"
+    if [ ! -f "$file" ]; then
+        log_pass "$label (file does not exist)"
+        return 0
+    fi
+    if jsonc_has_no_root_key "$file" "$key"; then
+        log_pass "$label"
+        return 0
+    else
+        log_fail "Unexpected root key '$key' or invalid JSONC in $file"
+        return 1
+    fi
+}
+
 # json_files_equal FILE1 FILE2
 # Returns 0 if both files contain semantically equal JSON (key order ignored).
 # Uses python3 for comparison (available in CI and most dev machines).
